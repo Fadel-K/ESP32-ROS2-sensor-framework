@@ -1,19 +1,23 @@
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 #include "esp_log.h"
-#include "string.h"
+#include <string.h>
 
-static const char *TAG = "DEBUG"; // Define a tag for log messages
+static const char *TAG = "TWAI";
 
-twai_node_handle_t node_hdl = NULL;
-twai_onchip_node_config_t node_config = {
+static twai_node_handle_t node_hdl = NULL;
+
+static twai_onchip_node_config_t node_config = {
     .io_cfg = {
-        .tx = 4,       // TWAI TX GPIO pin
-        .rx = 5,       // TWAI RX GPIO pin
+        .tx = 4,
+        .rx = 5,
     },
-    .bit_timing = {.bitrate = 200000,},  // 200 kbps bitrate
-    .tx_queue_depth = 5,        // Transmit queue depth set to 5
+    .bit_timing = {
+        .bitrate = 200000,
+    },
+    .tx_queue_depth = 5,
 };
+
 
 static bool twai_rx_cb(twai_node_handle_t handle, const twai_rx_done_event_data_t *edata, void *user_ctx)
 {
@@ -33,23 +37,80 @@ static bool twai_rx_cb(twai_node_handle_t handle, const twai_rx_done_event_data_
     return false;
 }
 
-void setup_twai() {
-    // Create a new TWAI controller driver instance
+void can_setup(void)
+{
     ESP_ERROR_CHECK(twai_new_node_onchip(&node_config, &node_hdl));
+
     twai_event_callbacks_t user_cbs = {
     .on_rx_done = twai_rx_cb,
     };
     ESP_ERROR_CHECK(twai_node_register_event_callbacks(node_hdl, &user_cbs, NULL));
-    // Start the TWAI controller
+    
     ESP_ERROR_CHECK(twai_node_enable(node_hdl));
+    ESP_LOGI(TAG, "TWAI enabled");
 }
-void send_msg(uint8_t send_buff[8] = {0}) {
-    twai_frame_t tx_msg = {};
-    tx_msg.header.id = 0x1;           // Message ID
-    tx_msg.header.ide = true;         // Use 29-bit extended ID format
-    tx_msg.buffer = send_buff;        // Pointer to data to transmit
-    tx_msg.buffer_len = sizeof(send_buff);  // Length of data to transmit
-    ESP_ERROR_CHECK(twai_node_transmit(node_hdl, &tx_msg, 0));  // Timeout = 0: returns immediately if queue is full
-    // ESP_ERROR_CHECK(twai_node_transmit_wait_all_done(node_hdl, -1));  // Wait for transmission to finish
-    ESP_ERROR_CHECK(twai_event_callbacks_t::on_tx_done(node_hdl, &user_cbs, NULL));
+
+// Send 8 bytes, classic CAN (DLC=8)
+esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
+{
+    // IMPORTANT: some TWAI implementations are zero-copy for TX buffers,
+    // so make the buffer stable until TX completes.
+    static uint8_t tx_buf[8];
+    memcpy(tx_buf, data, 8);
+
+    twai_frame_t tx = {
+        .header = {
+            .id  = id,
+            .ide = extended, // true = 29-bit, false = 11-bit
+            .rtr = false,
+            .dlc = 8,
+        },
+        .buffer = tx_buf,
+        .buffer_len = 8,
+    };
+
+    ESP_LOGI(TAG, "%d", sizeof(tx_buf));
+
+    esp_err_t err = twai_node_transmit(node_hdl, &tx, -1); // wait for space in TX queue
+    if (err != ESP_OK) return err;
+
+    // wait until actually sent (simplest, safest while learning)
+    return twai_node_transmit_wait_all_done(node_hdl, -1);
+}
+
+// Blocking receive: waits until *one* frame arrives
+// esp_err_t can_recv_once(void)
+// {
+//     uint8_t rx_buf[8];
+//     twai_frame_t rx = {
+//         .buffer = rx_buf,
+//         .buffer_len = sizeof(rx_buf),
+//     };
+
+//     // This call blocks until a frame is available.
+//     // (Function name may differ depending on IDF version; if yours lacks it,
+//     // I’ll map it to the correct one once you paste the compile error.)
+//     esp_err_t err = twai_node_receive(node_hdl, &rx, -1);
+//     if (err != ESP_OK) return err;
+
+//     // DLC is 0..8 for classic CAN :contentReference[oaicite:3]{index=3}
+//     uint8_t len = (rx.header.dlc <= 8) ? rx.header.dlc : 8;
+
+//     ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d", (unsigned long)rx.header.id, rx.header.ide, rx.header.dlc);
+//     ESP_LOG_BUFFER_HEX(TAG, rx_buf, len);
+
+//     return ESP_OK;
+// }
+
+void app_main(void)
+{
+    can_setup();
+
+    // test send (needs another node on bus to ACK, otherwise you can get TX errors)
+    const uint8_t data[8] = {1,2,3,4,5,6,7,8};
+    ESP_ERROR_CHECK(can_send_u8_8(0x123, false, data));
+
+    while (1) {
+        ESP_ERROR_CHECK(can_recv_once()); // blocks until something arrives
+    }
 }
