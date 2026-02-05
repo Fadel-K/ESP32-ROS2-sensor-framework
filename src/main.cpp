@@ -16,6 +16,13 @@ static twai_frame_header_t rx_hdr;
 static uint8_t rx_data[8];
 static uint8_t rx_len;
 
+// static TaskHandle_t s_tx_waiter = NULL;
+// static volatile bool s_tx_ok = false;
+static volatile bool tx_busy = false;
+static uint8_t tx_buf[8];  // persistent
+
+//TODO: Allow upto 5 tx_buf using tx_pool 
+
 static twai_onchip_node_config_t node_config = {
     .io_cfg = {
         .tx = 4,
@@ -49,8 +56,18 @@ static bool IRAM_ATTR twai_rx_cb(twai_node_handle_t handle, const twai_rx_done_e
     }
     return false;
 }
+
+static bool IRAM_ATTR twai_tx_done_cb(twai_node_handle_t handle, const twai_tx_done_event_data_t *edata, void *user_ctx) 
+{
+    (void)handle; (void)user_ctx; (void)edata; // stopping not used warning
+    
+    tx_busy=false;
+    return false;
+}
+
 static const twai_event_callbacks_t user_cbs = {
-.on_rx_done = twai_rx_cb,
+    .on_rx_done = twai_rx_cb,
+    .on_tx_done = twai_tx_done_cb,
 };
 
 void can_setup(void)
@@ -84,13 +101,15 @@ esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
         .buffer_len = 8,
     };
 
+    tx_busy = true;
+
     ESP_LOGI(TAG, "%d", sizeof(tx_buf));
 
-    esp_err_t err = twai_node_transmit(node_hdl, &tx, -1); // wait for space in TX queue
-    if (err != ESP_OK) return err;
-
-    // wait until actually sent (simplest, safest while learning)
-    return twai_node_transmit_wait_all_done(node_hdl, -1);
+    esp_err_t err = twai_node_transmit(node_hdl, &tx, 0); // doesn't wait for queue
+        if (err != ESP_OK) {
+        tx_busy = false; // didn’t queue, buffer can be reused
+    }
+    return err;
 }
 
 void app_main(void)

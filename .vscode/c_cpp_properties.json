@@ -9,7 +9,6 @@
             "name": "PlatformIO",
             "includePath": [
                 "/home/fadel/Desktop/espproj/ros2/include",
-                "/home/fadel/Desktop/espproj/ros2/src",
                 "/home/fadel/.platformio/packages/framework-espidf/components/xtensa/esp32s3/include",
                 "/home/fadel/.platformio/packages/framework-espidf/components/xtensa/include",
                 "/home/fadel/.platformio/packages/framework-espidf/components/xtensa/deprecated_include",
@@ -183,13 +182,13 @@
                 "/home/fadel/.platformio/packages/framework-espidf/components/touch_element/include",
                 "/home/fadel/.platformio/packages/framework-espidf/components/usb/include",
                 "/home/fadel/.platformio/packages/framework-espidf/components/wifi_provisioning/include",
+                "/home/fadel/Desktop/espproj/ros2/src",
                 ""
             ],
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
                     "/home/fadel/Desktop/espproj/ros2/include",
-                    "/home/fadel/Desktop/espproj/ros2/src",
                     "/home/fadel/.platformio/packages/framework-espidf/components/xtensa/esp32s3/include",
                     "/home/fadel/.platformio/packages/framework-espidf/components/xtensa/include",
                     "/home/fadel/.platformio/packages/framework-espidf/components/xtensa/deprecated_include",
@@ -363,6 +362,7 @@
                     "/home/fadel/.platformio/packages/framework-espidf/components/touch_element/include",
                     "/home/fadel/.platformio/packages/framework-espidf/components/usb/include",
                     "/home/fadel/.platformio/packages/framework-espidf/components/wifi_provisioning/include",
+                    "/home/fadel/Desktop/espproj/ros2/src",
                     ""
                 ]
             },
