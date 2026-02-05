@@ -2,7 +2,7 @@
 #include "esp_twai_onchip.h"
 #include "esp_log.h"
 #include <string.h>
-#include <esp_attr.h>
+// #include <esp_attr.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -25,8 +25,8 @@ static uint8_t tx_buf[8];  // persistent
 
 static twai_onchip_node_config_t node_config = {
     .io_cfg = {
-        .tx = 4,
-        .rx = 5,
+        .tx = GPIO_NUM_4,
+        .rx = GPIO_NUM_5,
     },
     .bit_timing = {
         .bitrate = 200000,
@@ -49,7 +49,7 @@ static bool IRAM_ATTR twai_rx_cb(twai_node_handle_t handle, const twai_rx_done_e
         rx_hdr = rx_frame.header;
 
         uint8_t len = (rx_frame.header.dlc <= 8) ? rx_frame.header.dlc : 8;
-        memcpy((void*)rx_data, tmp, len);
+        memcpy(rx_data, tmp, len);
         rx_len = len;
 
         rx_pending = true;
@@ -66,8 +66,8 @@ static bool IRAM_ATTR twai_tx_done_cb(twai_node_handle_t handle, const twai_tx_d
 }
 
 static const twai_event_callbacks_t user_cbs = {
-    .on_rx_done = twai_rx_cb,
     .on_tx_done = twai_tx_done_cb,
+    .on_rx_done = twai_rx_cb,
 };
 
 void can_setup(void)
@@ -84,22 +84,19 @@ void can_setup(void)
 // Send 8 bytes, classic CAN (DLC=8)
 esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
 {
+    if (tx_busy) return ESP_ERR_INVALID_STATE; //Remove for Pool?
 
     // IMPORTANT: some TWAI implementations are zero-copy for TX buffers,
     // so make the buffer stable until TX completes.
-    static uint8_t tx_buf[8];
     memcpy(tx_buf, data, 8);
 
-    twai_frame_t tx = {
-        .header = {
-            .id  = id,
-            .ide = extended, // true = 29-bit, false = 11-bit
-            .rtr = false,
-            .dlc = 8,
-        },
-        .buffer = tx_buf,
-        .buffer_len = 8,
-    };
+    twai_frame_t tx;
+    tx.header.id = id;
+    tx.header.dlc = 8;
+    tx.header.ide = extended;
+    tx.header.rtr = false;
+    tx.buffer = tx_buf;
+    tx.buffer_len = 8;
 
     tx_busy = true;
 
@@ -112,7 +109,7 @@ esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
     return err;
 }
 
-void app_main(void)
+extern "C" void app_main(void)
 {
     can_setup();
 
