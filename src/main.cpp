@@ -2,7 +2,6 @@
 #include "esp_twai_onchip.h"
 #include "esp_log.h"
 #include <string.h>
-// #include <esp_attr.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
