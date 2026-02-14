@@ -89,10 +89,13 @@ esp_err_t receive_i2c(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *buffer,
     return i2c_master_transmit_receive(dev, regbuf, sizeof(regbuf), buffer, len, 50);
 }
 
-esp_err_t receive_i2c(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *buffer, size_t len)
+esp_err_t transmit_i2c(i2c_master_dev_handle_t dev, uint8_t *buffer, size_t len)
 {
-    uint8_t regbuf[1] = { reg };
     return i2c_master_transmit(dev, buffer, len, 50);
+}
+
+esp_err_t read_adxl345(uint8_t *buffer){
+    return receive_i2c(adxl345_handle, 0x32, buffer, 6);
 }
 
 // ---- RX mailbox (ISR writes, main reads) ----
@@ -193,6 +196,7 @@ esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
     }
     return err;
 }
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "APP_MAIN STARTED");
@@ -202,25 +206,39 @@ void app_main(void)
 
     i2c_check_gy85_addrs();
 
-    uint8_t rx_data[1];
-    receive_i2c(adxl345_handle, 0x00, rx_data, 1);
-    uint8_t tx_data[1];
-    write_i2c(adxl345_handle, 0x00, tx_data, 1);
 
-    ESP_LOGI(TAG, "Data: 0x{%02X}", data[0]);
+    uint8_t rx_id[1];
+    receive_i2c(adxl345_handle, 0x00, rx_id, 1);
+
+    uint8_t reg = 0x31;
+    uint8_t tx_data[2] = {reg, 0x0B};
+    transmit_i2c(adxl345_handle, tx_data, 2);
+
+    reg = 0x2D;
+    tx_data[0] = reg;
+    tx_data[1] = 0x08;
+    transmit_i2c(adxl345_handle, tx_data, 2);
+
+    // uint8_t rx_data[6];
+    // read_adxl345(rx_data);
     
     // test send (needs another node on bus to ACK, otherwise you can get TX errors)
-    // const uint8_t data[8] = {1,2,3,4,5,6,7,8};
-    // ESP_ERROR_CHECK(can_send_u8_8(0x123, false, data));
-   
-    // while (1) {
-    //     if (rx_pending) {
-    //         rx_pending = false;
-    //         ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
-    //                  (unsigned long)rx_hdr.id, rx_hdr.ide, rx_hdr.dlc);
-    //         ESP_LOG_BUFFER_HEX(TAG, rx_data, rx_len);
-    //     }
-    //     // optional: tiny delay to avoid a hot spin loop
-    //     vTaskDelay(10);
-    // }
+    const uint8_t data[8] = {1,2,3,4,5,6,7,8};
+    ESP_ERROR_CHECK(can_send_u8_8(0x123, false, data));
+    
+    while (1) {
+        uint8_t rx_data[6];
+        read_adxl345(rx_data);
+
+        ESP_LOG_BUFFER_HEX(TAG, rx_data, 6);
+
+        if (rx_pending) {
+            rx_pending = false;
+            ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
+                     (unsigned long)rx_hdr.id, rx_hdr.ide, rx_hdr.dlc);
+            ESP_LOG_BUFFER_HEX(TAG, rx_data, rx_len);
+        }
+        // optional: tiny delay to avoid a hot spin loop
+        vTaskDelay(10);
+    }
 }
