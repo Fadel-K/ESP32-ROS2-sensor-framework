@@ -13,9 +13,25 @@
 #define ITG3205_ADDRS 0x68
 #define HMC5883L_ADDRS 0x1E
 
+#define TWAI_TX GPIO_NUM_4
+#define TWAI_RX GPIO_NUM_5
+
 static const char *TAG = "TWAI";
 
 static twai_node_handle_t node_hdl = NULL;
+
+// ---- RX mailbox (ISR writes, main reads) ----
+static volatile bool rx_pending = false;
+static twai_frame_header_t rx_hdr;
+static uint8_t rx_data[8];
+static uint8_t rx_len;
+
+// static TaskHandle_t s_tx_waiter = NULL;
+// static volatile bool s_tx_ok = false;
+static volatile bool tx_busy = false;
+static uint8_t tx_buf[8];  // persistent
+
+//TODO: Allow upto 5 tx_buf using tx_pool 
 
 // ---- I2c BUS config ------
 
@@ -98,28 +114,19 @@ esp_err_t read_adxl345(uint8_t *buffer){
     return receive_i2c(adxl345_handle, 0x32, buffer, 6);
 }
 
-// ---- RX mailbox (ISR writes, main reads) ----
-static volatile bool rx_pending = false;
-static twai_frame_header_t rx_hdr;
-static uint8_t rx_data[8];
-static uint8_t rx_len;
-
-// static TaskHandle_t s_tx_waiter = NULL;
-// static volatile bool s_tx_ok = false;
-static volatile bool tx_busy = false;
-static uint8_t tx_buf[8];  // persistent
-
-//TODO: Allow upto 5 tx_buf using tx_pool 
-
 static twai_onchip_node_config_t node_config = {
     .io_cfg = {
-        .tx = GPIO_NUM_4,
-        .rx = GPIO_NUM_5,
+        .tx = TWAI_TX,
+        .rx = TWAI_RX,
     },
     .bit_timing = {
         .bitrate = 200000,
     },
     .tx_queue_depth = 5,
+    .flags = {
+        .enable_self_test = true,
+        .enable_loopback = true,
+    }
 };
 
 
@@ -193,6 +200,7 @@ esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
     esp_err_t err = twai_node_transmit(node_hdl, &tx, 0); // doesn't wait for queue
         if (err != ESP_OK) {
         tx_busy = false; // didn’t queue, buffer can be reused
+        ESP_LOGI(TAG, "BUFFER FULL, CUDN'T SEND");
     }
     return err;
 }
@@ -227,11 +235,13 @@ void app_main(void)
     ESP_ERROR_CHECK(can_send_u8_8(0x123, false, data));
     
     while (1) {
-        uint8_t rx_data[6];
-        read_adxl345(rx_data);
+        // uint8_t rx_data[6];
+        // read_adxl345(rx_data);
 
-        ESP_LOG_BUFFER_HEX(TAG, rx_data, 6);
-
+        // ESP_LOG_BUFFER_HEX(TAG, rx_data, 6);
+        if (tx_busy==true){
+            ESP_LOGI(TAG, "TX BUSY");
+        }
         if (rx_pending) {
             rx_pending = false;
             ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
