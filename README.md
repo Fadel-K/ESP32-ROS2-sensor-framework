@@ -30,3 +30,5 @@ This project uses CMake and PlatformIO for building and deploying ESP32 firmware
 - [ ] **Create a true buffer for TX transmission** - Currently TX transmission blocks and sends data one by one. Need to implement a proper buffering system to handle asynchronous transmission without blocking.
 
 - [ ] **Add external oscillator for accurate timekeeping** - Integrate an external oscillator to improve timing accuracy and stability for time-dependent sensor operations.
+
+- [ ] **Add external oscillator for accurate timekeeping** - Integrate an external oscillator to improve timing accuracy and stability for time-dependent sensor operations.

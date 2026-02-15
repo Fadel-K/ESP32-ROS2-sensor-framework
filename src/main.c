@@ -69,6 +69,10 @@ i2c_master_dev_handle_t adxl345_handle;
 i2c_master_dev_handle_t itg3205_handle;
 i2c_master_dev_handle_t hmc5883l_handle;
 
+void esp32_setup(){
+    time = getTick
+}
+
 void i2c_setup(){
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &master_bus_handle));
     ESP_ERROR_CHECK(i2c_master_bus_add_device(master_bus_handle, &adxl345_cfg, &adxl345_handle));
@@ -214,7 +218,6 @@ void app_main(void)
 
     i2c_check_gy85_addrs();
 
-
     uint8_t rx_id[1];
     receive_i2c(adxl345_handle, 0x00, rx_id, 1);
 
@@ -239,6 +242,8 @@ void app_main(void)
         // read_adxl345(rx_data);
 
         // ESP_LOG_BUFFER_HEX(TAG, rx_data, 6);
+        uint64_t ms_since_boot = esp_timer_get_time() / 1000;
+
         if (tx_busy==true){
             ESP_LOGI(TAG, "TX BUSY");
         }

@@ -1,6 +1,8 @@
-//TODO: 
+#include <stdint.h>
 
-struct Header {   // Structure declaration
-  int myNum;           // Member (int variable)
-  char myLetter;       // Member (char variable)
-}; // End the structure with a semicolon
+struct Header {   // header declaration
+    uint64_t time_stamp;
+    uint8_t sensor_id;
+    uint8_t node_id;
+    uint8_t len;
+}; 
