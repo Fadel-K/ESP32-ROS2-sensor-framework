@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#define HEADER_SIZE_BYTES 7
+
 typedef struct {   // header declaration
     uint64_t time_stamp_ms;
     uint8_t sensor_id;

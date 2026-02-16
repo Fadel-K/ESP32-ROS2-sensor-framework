@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
 #include "ros_sensor_struct.h"
+#include "esp_timer.h"
 
 #define I2C_MASTER_SCL_IO 9
 #define I2C_MASTER_SDA_IO 8
@@ -20,6 +21,7 @@
 static const char *TAG = "TWAI";
 
 static twai_node_handle_t node_hdl = NULL;
+TimerHandle_t read_sensor_timer = NULL;
 
 // ---- RX mailbox (ISR writes, main reads) ----
 static volatile bool rx_pending = false;
@@ -30,6 +32,7 @@ static uint8_t rx_len;
 // static TaskHandle_t s_tx_waiter = NULL;
 // static volatile bool s_tx_ok = false;
 static volatile bool tx_busy = false;
+static volatile bool read_sensor = false;
 static uint8_t tx_buf[8];  // persistent
 
 //TODO: Allow upto 5 tx_buf using tx_pool 
@@ -176,11 +179,11 @@ void can_setup(void)
     ESP_LOGI(TAG, "TWAI enabled");
 }
 
-// Send upto 64 bytes, classic CAN (DLC=8)
-esp_err_t can_send(uint32_t id, bool extended, const uint8_t data[], uint8_t len)
+// Send upto 8 bytes, classic CAN (DLC=8)
+esp_err_t can_transmit(uint32_t id, bool extended, const uint8_t data[], uint8_t len)
 {
-    if (len > 64) {
-        ESP_LOGI(TAG, "INVALID LEN: CAN ONLY SEND UPTO 64 BYTES");
+    if (len > 8) {
+        ESP_LOGI(TAG, "INVALID LEN: CAN ONLY SEND UPTO 8 BYTES");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -188,7 +191,8 @@ esp_err_t can_send(uint32_t id, bool extended, const uint8_t data[], uint8_t len
 
     // IMPORTANT: some TWAI implementations are zero-copy for TX buffers,
     // so make the buffer stable until TX completes.
-    memcpy(tx_buf, data, 8);
+    memset(tx_buf, 0, 8);
+    memcpy(tx_buf, data, len);
 
     twai_frame_t tx;
     tx.header.id = id;
@@ -200,7 +204,7 @@ esp_err_t can_send(uint32_t id, bool extended, const uint8_t data[], uint8_t len
 
     tx_busy = true;
 
-    ESP_LOGI(TAG, "TRANSMITTING: %d", sizeof(tx_buf));
+    ESP_LOGI(TAG, "TRANSMITTING: %d", len);
 
     esp_err_t err = twai_node_transmit(node_hdl, &tx, 0); // doesn't wait for queue
         if (err != ESP_OK) {
@@ -210,12 +214,31 @@ esp_err_t can_send(uint32_t id, bool extended, const uint8_t data[], uint8_t len
     return err;
 }
 
+void transmit_adxl345(TimerHandle_t xTimer)
+{   
+    read_sensor=true;
+}
+
+void timer_setup()
+{
+    read_sensor_timer = xTimerCreate(
+        "SensorRead",              // Timer name
+        1000 / portTICK_PERIOD_MS, // 1s period
+        pdTRUE,                    // Auto-reload (periodic timer)
+        NULL,                      // Timer ID
+        transmit_adxl345              // Callback function
+    );
+
+    xTimerStart(read_sensor_timer, 0);
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "APP_MAIN STARTED");
 
     can_setup();
     i2c_setup();
+    timer_setup();  // Start the sensor read timer
 
     i2c_check_gy85_addrs();
 
@@ -233,31 +256,8 @@ void app_main(void)
 
     // uint8_t rx_data[6];
     // read_adxl345(rx_data);
-    
-    static uint16_t can_id=0x0001; //ONLY UPTO 11 BITS USABLE WITHOUT EXTENDED (NOT USING EXTENDED HERE)
 
     while (1) {
-        uint8_t rx_data[6];
-        read_adxl345(rx_data);
-
-        ESP_LOG_BUFFER_HEX("SELF SENSOR DATA", rx_data, 6);
-
-        uint8_t len = sizeof(GeneralSensor) + 6;
-        
-        // dynamic allocation (since im using dynamic array)
-        GeneralSensor *adxl345 = (GeneralSensor *)malloc(len);
-        if (adxl345 != NULL) {
-            adxl345->header.time_stamp_ms = esp_timer_get_time() / 1000;
-            adxl345->header.sensor_id = 1;
-            adxl345->header.node_id = 1;
-            adxl345->header.len = 6;
-            memcpy(adxl345->data, rx_data, 6);
-
-            can_send(can_id, false, adxl345, len);
-            
-            free(adxl345);  // cleanup
-        }
-
         if (tx_busy==true){
             ESP_LOGI(TAG, "TX BUSY");
         }
@@ -266,6 +266,46 @@ void app_main(void)
             ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
                      (unsigned long)rx_hdr.id, rx_hdr.ide, rx_hdr.dlc);
             ESP_LOG_BUFFER_HEX(TAG, rx_data, rx_len);
+        }
+        
+        if (read_sensor == true){
+            uint8_t rx_data[6];
+            read_adxl345(rx_data);
+
+            ESP_LOG_BUFFER_HEX("SELF SENSOR DATA", rx_data, 6);
+
+            static uint16_t can_id = 0x0001; // ONLY UPTO 11 BITS USABLE WITHOUT EXTENDED (NOT USING EXTENDED HERE)
+
+            uint8_t len = sizeof(GeneralSensor) + 6;
+            uint8_t buffer_size = HEADER_SIZE_BYTES + 6;
+            
+            // dynamic allocation (since im using dynamic array)
+            GeneralSensor *adxl345 = (GeneralSensor *)malloc(len);
+
+            if (adxl345 != NULL)
+            {
+                adxl345->header.time_stamp_ms = esp_timer_get_time() / 1000;
+                adxl345->header.sensor_id = 1;
+                adxl345->header.node_id = 1;
+                adxl345->header.len = 6;
+                memcpy(adxl345->data, rx_data, 6);
+
+                uint8_t sensor_buffer[buffer_size];
+                pack_sensor_to_array(adxl345, sensor_buffer);
+
+                ESP_LOG_BUFFER_HEX("SENSOR DATA:", sensor_buffer, buffer_size);
+                // Send sensor_buffer in 8-byte chunks via CAN
+                for (uint8_t i = 0; i < buffer_size; i += 8)
+                {
+                    uint8_t remaining = buffer_size - i;
+                    uint8_t chunk_len = (remaining < 8) ? remaining : 8;
+                    can_transmit(can_id++, false, &sensor_buffer[i], chunk_len);
+                }
+
+                free(adxl345); // cleanup
+            }
+
+            read_sensor=false;
         }
         // optional: tiny delay to avoid a hot spin loop
         vTaskDelay(10);
