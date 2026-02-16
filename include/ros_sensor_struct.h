@@ -1,6 +1,11 @@
+#ifndef ROS_SENSOR_STRUCT_H
+#define ROS_SENSOR_STRUCT_H
+
 #include "header.h"
 
-struct GeneralSensor {
+typedef struct {
     Header header;
     uint8_t data[];
-};
+} GeneralSensor;
+
+#endif

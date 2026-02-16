@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
+#include "ros_sensor_struct.h"
 
 #define I2C_MASTER_SCL_IO 9
 #define I2C_MASTER_SDA_IO 8
@@ -44,7 +45,6 @@ i2c_master_bus_config_t i2c_mst_config = {
     .flags.enable_internal_pullup = true,
 };
 
-
 i2c_master_bus_handle_t master_bus_handle;
 
 i2c_device_config_t adxl345_cfg = {
@@ -68,10 +68,6 @@ i2c_device_config_t hmc5883l_cfg = {
 i2c_master_dev_handle_t adxl345_handle;
 i2c_master_dev_handle_t itg3205_handle;
 i2c_master_dev_handle_t hmc5883l_handle;
-
-void esp32_setup(){
-    time = getTick
-}
 
 void i2c_setup(){
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &master_bus_handle));
@@ -128,8 +124,8 @@ static twai_onchip_node_config_t node_config = {
     },
     .tx_queue_depth = 5,
     .flags = {
-        .enable_self_test = true,
-        .enable_loopback = true,
+        .enable_self_test = true, //DEBUG ONLY
+        .enable_loopback = true, //DEBUG ONLY
     }
 };
 
@@ -180,9 +176,14 @@ void can_setup(void)
     ESP_LOGI(TAG, "TWAI enabled");
 }
 
-// Send 8 bytes, classic CAN (DLC=8)
-esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
+// Send upto 64 bytes, classic CAN (DLC=8)
+esp_err_t can_send(uint32_t id, bool extended, const uint8_t data[], uint8_t len)
 {
+    if (len > 64) {
+        ESP_LOGI(TAG, "INVALID LEN: CAN ONLY SEND UPTO 64 BYTES");
+        return ESP_ERR_INVALID_ARG;
+    }
+
     if (tx_busy) return ESP_ERR_INVALID_STATE; //Remove for Pool?
 
     // IMPORTANT: some TWAI implementations are zero-copy for TX buffers,
@@ -195,15 +196,15 @@ esp_err_t can_send_u8_8(uint32_t id, bool extended, const uint8_t data[8])
     tx.header.ide = extended;
     tx.header.rtr = false;
     tx.buffer = tx_buf;
-    tx.buffer_len = 8;
+    tx.buffer_len = len;
 
     tx_busy = true;
 
-    ESP_LOGI(TAG, "%d", sizeof(tx_buf));
+    ESP_LOGI(TAG, "TRANSMITTING: %d", sizeof(tx_buf));
 
     esp_err_t err = twai_node_transmit(node_hdl, &tx, 0); // doesn't wait for queue
         if (err != ESP_OK) {
-        tx_busy = false; // didn’t queue, buffer can be reused
+        tx_busy = false; // didn’t queue, buffer can be reused (need to fix later)
         ESP_LOGI(TAG, "BUFFER FULL, CUDN'T SEND");
     }
     return err;
@@ -233,16 +234,29 @@ void app_main(void)
     // uint8_t rx_data[6];
     // read_adxl345(rx_data);
     
-    // test send (needs another node on bus to ACK, otherwise you can get TX errors)
-    const uint8_t data[8] = {1,2,3,4,5,6,7,8};
-    ESP_ERROR_CHECK(can_send_u8_8(0x123, false, data));
-    
-    while (1) {
-        // uint8_t rx_data[6];
-        // read_adxl345(rx_data);
+    static uint16_t can_id=0x0001; //ONLY UPTO 11 BITS USABLE WITHOUT EXTENDED (NOT USING EXTENDED HERE)
 
-        // ESP_LOG_BUFFER_HEX(TAG, rx_data, 6);
-        uint64_t ms_since_boot = esp_timer_get_time() / 1000;
+    while (1) {
+        uint8_t rx_data[6];
+        read_adxl345(rx_data);
+
+        ESP_LOG_BUFFER_HEX("SELF SENSOR DATA", rx_data, 6);
+
+        uint8_t len = sizeof(GeneralSensor) + 6;
+        
+        // dynamic allocation (since im using dynamic array)
+        GeneralSensor *adxl345 = (GeneralSensor *)malloc(len);
+        if (adxl345 != NULL) {
+            adxl345->header.time_stamp_ms = esp_timer_get_time() / 1000;
+            adxl345->header.sensor_id = 1;
+            adxl345->header.node_id = 1;
+            adxl345->header.len = 6;
+            memcpy(adxl345->data, rx_data, 6);
+
+            can_send(can_id, false, adxl345, len);
+            
+            free(adxl345);  // cleanup
+        }
 
         if (tx_busy==true){
             ESP_LOGI(TAG, "TX BUSY");
