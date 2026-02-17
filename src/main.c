@@ -50,7 +50,7 @@ static volatile uint8_t tx_pool_head = 0;
 
 // static TaskHandle_t s_tx_waiter = NULL;
 // static volatile bool s_tx_ok = false;
-static volatile bool tx_busy = false;
+// static volatile bool tx_busy = false;
 static volatile bool read_sensor = false;
 static uint8_t tx_buf[8];  // persistent
 
@@ -193,8 +193,6 @@ static bool IRAM_ATTR twai_rx_cb(twai_node_handle_t handle, const twai_rx_done_e
 static bool IRAM_ATTR twai_tx_done_cb(twai_node_handle_t handle, const twai_tx_done_event_data_t *edata, void *user_ctx) 
 {
     (void)handle; (void)user_ctx; (void)edata; // stopping not used warning
-    
-    tx_busy=false;
     return false;
 }
 
@@ -222,12 +220,13 @@ esp_err_t can_transmit(uint32_t id, bool extended, const uint8_t data[], uint8_t
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (tx_busy) return ESP_ERR_INVALID_STATE; //Remove for Pool?
-
     // IMPORTANT: some TWAI implementations are zero-copy for TX buffers,
     // so make the buffer stable until TX completes.
-    memset(tx_buf, 0, 8);
-    memcpy(tx_buf, data, len);
+
+    uint8_t idx = tx_pool_head++ % TX_POOL;
+
+    memset(tx_pool[idx], 0, 8);
+    memcpy(tx_pool[idx], data, len);
 
     twai_frame_t tx;
     tx.header.id = id;
@@ -237,13 +236,8 @@ esp_err_t can_transmit(uint32_t id, bool extended, const uint8_t data[], uint8_t
     tx.buffer = tx_buf;
     tx.buffer_len = len;
 
-    tx_busy = true;
-
-    ESP_LOGI(TAG, "TRANSMITTING: %d", len);
-
-    esp_err_t err = twai_node_transmit(node_hdl, &tx, 50); // doesn't wait for queue
+    esp_err_t err = twai_node_transmit(node_hdl, &tx, 0); // doesn't wait for queue
         if (err != ESP_OK) {
-        tx_busy = false; // didn’t queue, buffer can be reused (need to fix later)
         ESP_LOGE(TAG, "TX failed: %s", esp_err_to_name(err));
     }
     return err;
@@ -288,9 +282,6 @@ void app_main(void)
     // read_adxl345(rx_data);
 
     while (1) {
-        if (tx_busy==true){
-            ESP_LOGI(TAG, "TX BUSY");
-        }
         if (rx_pending) {
             for (++rx_frames_read; rx_frames_read<=rx_frames_max; rx_frames_read++){
                 ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
@@ -336,7 +327,6 @@ void app_main(void)
                     // ESP_LOGI(TAG, "can transmit id: %d", i);
                     uint8_t remaining = buffer_size - i;
                     uint8_t chunk_len = (remaining < 8) ? remaining : 8;
-                    while (tx_busy) vTaskDelay(1);   // TODO: REMOVE ONCE POOL IS IMPLEMENTED 
                     can_transmit(can_id++, false, &sensor_buffer[i], chunk_len);
                 }
 
