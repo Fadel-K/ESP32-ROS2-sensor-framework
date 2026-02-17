@@ -158,7 +158,7 @@ static twai_onchip_node_config_t node_config = {
     .bit_timing = {
         .bitrate = 200000,
     },
-    .tx_queue_depth = 5,
+    .tx_queue_depth = TX_POOL,
     .flags = {
         .enable_self_test = true, //DEBUG ONLY
         .enable_loopback = true, //DEBUG ONLY
