@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define HEADER_SIZE_BYTES 7
+#define HEADER_SIZE_BYTES 11
 
 typedef struct {   // header declaration
     uint64_t time_stamp_ms;

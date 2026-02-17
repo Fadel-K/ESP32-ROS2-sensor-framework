@@ -12,12 +12,16 @@ typedef struct {
 void pack_sensor_to_array(const GeneralSensor *sensor, uint8_t* buffer) { //TODO: Could implement checking if buffer is too small
     uint8_t i=0;
     
-    //converting header into 8 bit array
-    uint32_t time_stamp = sensor->header.time_stamp_ms;
+    //converting header into 8 bit array (timestamp is 64-bit)
+    uint64_t time_stamp = sensor->header.time_stamp_ms;
     buffer[i++] = (uint8_t)(time_stamp & 0xFF);
     buffer[i++] = (uint8_t)((time_stamp >> 8) & 0xFF);
     buffer[i++] = (uint8_t)((time_stamp >> 16) & 0xFF);
     buffer[i++] = (uint8_t)((time_stamp >> 24) & 0xFF);
+    buffer[i++] = (uint8_t)((time_stamp >> 32) & 0xFF);
+    buffer[i++] = (uint8_t)((time_stamp >> 40) & 0xFF);
+    buffer[i++] = (uint8_t)((time_stamp >> 48) & 0xFF);
+    buffer[i++] = (uint8_t)((time_stamp >> 56) & 0xFF);
 
     buffer[i++]=sensor->header.sensor_id;
     buffer[i++]=sensor->header.node_id;

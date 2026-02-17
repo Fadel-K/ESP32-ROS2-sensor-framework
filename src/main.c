@@ -18,6 +18,9 @@
 #define TWAI_TX GPIO_NUM_4
 #define TWAI_RX GPIO_NUM_5
 
+#define RX_BUFFER_SIZE 8
+#define TX_POOL 5
+
 static const char *TAG = "TWAI";
 
 static twai_node_handle_t node_hdl = NULL;
@@ -25,9 +28,25 @@ TimerHandle_t read_sensor_timer = NULL;
 
 // ---- RX mailbox (ISR writes, main reads) ----
 static volatile bool rx_pending = false;
-static twai_frame_header_t rx_hdr;
-static uint8_t rx_data[8];
-static uint8_t rx_len;
+
+typedef struct {
+  twai_frame_header_t header;
+  uint8_t len;
+  uint8_t data[8];
+} rx_slot_t;
+
+static rx_slot_t rx_frames[RX_BUFFER_SIZE];
+static volatile int8_t rx_frames_read=-1;
+static volatile int8_t rx_frames_max=-1;
+
+//------TX BUFFER POOL ----
+
+static uint8_t tx_pool[TX_POOL][8];
+static volatile uint8_t tx_pool_head = 0;
+
+// static twai_frame_header_t rx_hdr;
+// static uint8_t rx_data[64]; //here max packet size
+// static uint8_t rx_len;
 
 // static TaskHandle_t s_tx_waiter = NULL;
 // static volatile bool s_tx_ok = false;
@@ -117,6 +136,20 @@ esp_err_t read_adxl345(uint8_t *buffer){
     return receive_i2c(adxl345_handle, 0x32, buffer, 6);
 }
 
+void adxl345_setup(){
+    uint8_t rx_id[1];
+    receive_i2c(adxl345_handle, 0x00, rx_id, 1);
+
+    uint8_t reg = 0x31;
+    uint8_t tx_data[2] = {reg, 0x0B};
+    transmit_i2c(adxl345_handle, tx_data, 2);
+
+    reg = 0x2D;
+    tx_data[0] = reg;
+    tx_data[1] = 0x08;
+    transmit_i2c(adxl345_handle, tx_data, 2);
+}
+
 static twai_onchip_node_config_t node_config = {
     .io_cfg = {
         .tx = TWAI_TX,
@@ -144,13 +177,15 @@ static bool IRAM_ATTR twai_rx_cb(twai_node_handle_t handle, const twai_rx_done_e
         .buffer_len = sizeof(tmp),
     };
     if (ESP_OK == twai_node_receive_from_isr(handle, &rx_frame)) {
-        rx_hdr = rx_frame.header;
+        if (rx_frames_max + 1 < RX_BUFFER_SIZE) {
+            rx_frames[++rx_frames_max].header = rx_frame.header;
 
-        uint8_t len = (rx_frame.header.dlc <= 8) ? rx_frame.header.dlc : 8;
-        memcpy(rx_data, tmp, len);
-        rx_len = len;
+            uint8_t len = (rx_frame.header.dlc <= 8) ? rx_frame.header.dlc : 8;
+            rx_frames[rx_frames_max].len = len;
+            memcpy(rx_frames[rx_frames_max].data, tmp, len);
 
-        rx_pending = true;
+            rx_pending = true;
+        }
     }
     return false;
 }
@@ -196,7 +231,7 @@ esp_err_t can_transmit(uint32_t id, bool extended, const uint8_t data[], uint8_t
 
     twai_frame_t tx;
     tx.header.id = id;
-    tx.header.dlc = 8;
+    tx.header.dlc = len;
     tx.header.ide = extended;
     tx.header.rtr = false;
     tx.buffer = tx_buf;
@@ -206,10 +241,10 @@ esp_err_t can_transmit(uint32_t id, bool extended, const uint8_t data[], uint8_t
 
     ESP_LOGI(TAG, "TRANSMITTING: %d", len);
 
-    esp_err_t err = twai_node_transmit(node_hdl, &tx, 0); // doesn't wait for queue
+    esp_err_t err = twai_node_transmit(node_hdl, &tx, 50); // doesn't wait for queue
         if (err != ESP_OK) {
         tx_busy = false; // didn’t queue, buffer can be reused (need to fix later)
-        ESP_LOGI(TAG, "BUFFER FULL, CUDN'T SEND");
+        ESP_LOGE(TAG, "TX failed: %s", esp_err_to_name(err));
     }
     return err;
 }
@@ -232,27 +267,22 @@ void timer_setup()
     xTimerStart(read_sensor_timer, 0);
 }
 
-void app_main(void)
-{
-    ESP_LOGI(TAG, "APP_MAIN STARTED");
-
+void esp32_setup()
+{   
     can_setup();
     i2c_setup();
     timer_setup();  // Start the sensor read timer
 
     i2c_check_gy85_addrs();
 
-    uint8_t rx_id[1];
-    receive_i2c(adxl345_handle, 0x00, rx_id, 1);
+    adxl345_setup();
+}
 
-    uint8_t reg = 0x31;
-    uint8_t tx_data[2] = {reg, 0x0B};
-    transmit_i2c(adxl345_handle, tx_data, 2);
+void app_main(void)
+{
+    ESP_LOGI(TAG, "APP_MAIN STARTED");
 
-    reg = 0x2D;
-    tx_data[0] = reg;
-    tx_data[1] = 0x08;
-    transmit_i2c(adxl345_handle, tx_data, 2);
+    esp32_setup();
 
     // uint8_t rx_data[6];
     // read_adxl345(rx_data);
@@ -262,10 +292,15 @@ void app_main(void)
             ESP_LOGI(TAG, "TX BUSY");
         }
         if (rx_pending) {
+            for (++rx_frames_read; rx_frames_read<=rx_frames_max; rx_frames_read++){
+                ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
+                        (unsigned long)rx_frames[rx_frames_read].header.id,
+                        rx_frames[rx_frames_read].header.ide,
+                        rx_frames[rx_frames_read].header.dlc);
+                ESP_LOG_BUFFER_HEX(TAG, rx_frames[rx_frames_read].data, rx_frames[rx_frames_read].len);
+            }
+            rx_frames_read = rx_frames_max = -1;
             rx_pending = false;
-            ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
-                     (unsigned long)rx_hdr.id, rx_hdr.ide, rx_hdr.dlc);
-            ESP_LOG_BUFFER_HEX(TAG, rx_data, rx_len);
         }
         
         if (read_sensor == true){
@@ -276,8 +311,9 @@ void app_main(void)
 
             static uint16_t can_id = 0x0001; // ONLY UPTO 11 BITS USABLE WITHOUT EXTENDED (NOT USING EXTENDED HERE)
 
-            uint8_t len = sizeof(GeneralSensor) + 6;
-            uint8_t buffer_size = HEADER_SIZE_BYTES + 6;
+            uint8_t data_size = 6;
+            uint8_t len = sizeof(GeneralSensor) + data_size;
+            uint8_t buffer_size = HEADER_SIZE_BYTES + data_size;
             
             // dynamic allocation (since im using dynamic array)
             GeneralSensor *adxl345 = (GeneralSensor *)malloc(len);
@@ -297,8 +333,10 @@ void app_main(void)
                 // Send sensor_buffer in 8-byte chunks via CAN
                 for (uint8_t i = 0; i < buffer_size; i += 8)
                 {
+                    // ESP_LOGI(TAG, "can transmit id: %d", i);
                     uint8_t remaining = buffer_size - i;
                     uint8_t chunk_len = (remaining < 8) ? remaining : 8;
+                    while (tx_busy) vTaskDelay(1);   // TODO: REMOVE ONCE POOL IS IMPLEMENTED 
                     can_transmit(can_id++, false, &sensor_buffer[i], chunk_len);
                 }
 
@@ -307,7 +345,7 @@ void app_main(void)
 
             read_sensor=false;
         }
-        // optional: tiny delay to avoid a hot spin loop
+        // NECESSARY: tiny delay to avoid a hot spin loop
         vTaskDelay(10);
     }
 }
