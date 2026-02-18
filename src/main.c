@@ -18,8 +18,8 @@
 #define TWAI_TX GPIO_NUM_4
 #define TWAI_RX GPIO_NUM_5
 
-#define RX_BUFFER_SIZE 8
-#define TX_POOL 5
+#define RX_QUEUE_LEN 32
+#define TX_QUEUE_LEN 32
 
 static const char *TAG = "TWAI";
 
@@ -35,26 +35,17 @@ typedef struct {
   uint8_t data[8];
 } rx_slot_t;
 
-static rx_slot_t rx_frames[RX_BUFFER_SIZE];
-static volatile int8_t rx_frames_read=-1;
-static volatile int8_t rx_frames_max=-1;
+typedef struct {
+    uint32_t id;
+    uint8_t  ide;   // 0=std, 1=extended
+    uint8_t  dlc;   // 0..8
+    uint8_t  data[8];
+} can_msg_t;
 
-//------TX BUFFER POOL ----
+static QueueHandle_t rx_queue = NULL;
+static QueueHandle_t tx_queue = NULL;
 
-static uint8_t tx_pool[TX_POOL][8];
-static volatile uint8_t tx_pool_head = 0;
-
-// static twai_frame_header_t rx_hdr;
-// static uint8_t rx_data[64]; //here max packet size
-// static uint8_t rx_len;
-
-// static TaskHandle_t s_tx_waiter = NULL;
-// static volatile bool s_tx_ok = false;
-// static volatile bool tx_busy = false;
 static volatile bool read_sensor = false;
-static uint8_t tx_buf[8];  // persistent
-
-//TODO: Allow upto 5 tx_buf using tx_pool 
 
 // ---- I2c BUS config ------
 
@@ -158,7 +149,7 @@ static twai_onchip_node_config_t node_config = {
     .bit_timing = {
         .bitrate = 200000,
     },
-    .tx_queue_depth = TX_POOL,
+    .tx_queue_depth = 5,
     .flags = {
         .enable_self_test = true, //DEBUG ONLY
         .enable_loopback = true, //DEBUG ONLY
@@ -176,19 +167,49 @@ static bool IRAM_ATTR twai_rx_cb(twai_node_handle_t handle, const twai_rx_done_e
         .buffer = tmp,
         .buffer_len = sizeof(tmp),
     };
+
     if (ESP_OK == twai_node_receive_from_isr(handle, &rx_frame)) {
-        if (rx_frames_max + 1 < RX_BUFFER_SIZE) {
-            rx_frames[++rx_frames_max].header = rx_frame.header;
 
-            uint8_t len = (rx_frame.header.dlc <= 8) ? rx_frame.header.dlc : 8;
-            rx_frames[rx_frames_max].len = len;
-            memcpy(rx_frames[rx_frames_max].data, tmp, len);
+        can_msg_t m = {0};
 
-            rx_pending = true;
+        m.id  = rx_frame.header.id;
+        m.ide = rx_frame.header.ide;
+
+        uint8_t len = (rx_frame.header.dlc <= 8) ? rx_frame.header.dlc : 8;
+
+        m.dlc = len;
+        memcpy(m.data, tmp, len);
+
+        BaseType_t hp_task_woken = pdFALSE;
+        BaseType_t ok = xQueueSendFromISR(rx_queue, &m, &hp_task_woken);
+        
+        (void)ok;
+        // if (!ok) { /* queue full: drop frame / count drops */ }
+        
+        if (hp_task_woken) {
+            portYIELD_FROM_ISR();
         }
     }
     return false;
 }
+    
+
+static void rx_task(void *arg)
+{
+    (void)arg;
+
+    can_msg_t m = {0};
+
+    while (1) {
+        // Do whatever u want here with the rx data
+        if (xQueueReceive(rx_queue, &m, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGI(TAG, "RX id=0x%lx ide=%u dlc=%u",
+                     (unsigned long)m.id, m.ide, m.dlc);
+            ESP_LOG_BUFFER_HEX(TAG, m.data, m.dlc);
+        }
+    }
+}
+
 
 static bool IRAM_ATTR twai_tx_done_cb(twai_node_handle_t handle, const twai_tx_done_event_data_t *edata, void *user_ctx) 
 {
@@ -208,39 +229,60 @@ void can_setup(void)
 
     ESP_ERROR_CHECK(twai_node_register_event_callbacks(node_hdl, &user_cbs, NULL));
     
+    rx_queue = xQueueCreate(RX_QUEUE_LEN, sizeof(can_msg_t));
+    tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(can_msg_t));
+
+    configASSERT(rx_queue);
+    configASSERT(tx_queue);
+
     ESP_ERROR_CHECK(twai_node_enable(node_hdl));
     ESP_LOGI(TAG, "TWAI enabled");
+
+    xTaskCreatePinnedToCore(tx_task, "tx_task", 4096, NULL, 10, NULL, 0); //10 is arbitrary priority here, maybe change?
+    xTaskCreatePinnedToCore(rx_task, "rx_task", 4096, NULL, 11, NULL, 0); 
 }
 
-// Send upto 8 bytes, classic CAN (DLC=8)
-esp_err_t can_transmit(uint32_t id, bool extended, const uint8_t data[], uint8_t len)
+static void tx_task(void *arg)
 {
-    if (len > 8) {
-        ESP_LOGI(TAG, "INVALID LEN: CAN ONLY SEND UPTO 8 BYTES");
-        return ESP_ERR_INVALID_ARG;
+    (void)arg;
+    can_msg_t m = {0};
+
+    while (1) {
+        if (xQueueReceive(tx_queue, &m, portMAX_DELAY) == pdTRUE) {
+            twai_frame_t tx = {0};
+            tx.header.id  = m.id;
+            tx.header.ide = m.ide;
+            tx.header.rtr = false;
+            tx.header.dlc = m.dlc;
+            tx.buffer     = m.data;
+            tx.buffer_len = m.dlc;
+
+            esp_err_t err = twai_node_transmit(node_hdl, &tx, pdMS_TO_TICKS(50));
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "TX failed id=0x%lx: %s",
+                         (unsigned long)m.id, esp_err_to_name(err));
+            }
+        }
     }
+}
 
-    // IMPORTANT: some TWAI implementations are zero-copy for TX buffers,
-    // so make the buffer stable until TX completes.
 
-    uint8_t idx = tx_pool_head++ % TX_POOL;
+// Send upto 8 bytes, classic CAN (DLC=8)
+esp_err_t can_send_async(uint32_t id, bool extended, const uint8_t *data, uint8_t len, TickType_t wait)
+{
+    if (len > 8) return ESP_ERR_INVALID_ARG;
 
-    memset(tx_pool[idx], 0, 8);
-    memcpy(tx_pool[idx], data, len);
+    can_msg_t m = {0};
+    m.id  = id;
+    m.ide = extended ? 1 : 0;
+    m.dlc = len;
 
-    twai_frame_t tx;
-    tx.header.id = id;
-    tx.header.dlc = len;
-    tx.header.ide = extended;
-    tx.header.rtr = false;
-    tx.buffer = tx_buf;
-    tx.buffer_len = len;
+    memcpy(m.data, data, len);
 
-    esp_err_t err = twai_node_transmit(node_hdl, &tx, 0); // doesn't wait for queue
-        if (err != ESP_OK) {
-        ESP_LOGE(TAG, "TX failed: %s", esp_err_to_name(err));
+    if (xQueueSend(tx_queue, &m, wait) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;  // queue full
     }
-    return err;
+    return ESP_OK;
 }
 
 void transmit_adxl345(TimerHandle_t xTimer)
@@ -281,19 +323,8 @@ void app_main(void)
     // uint8_t rx_data[6];
     // read_adxl345(rx_data);
 
-    while (1) {
-        if (rx_pending) {
-            for (++rx_frames_read; rx_frames_read<=rx_frames_max; rx_frames_read++){
-                ESP_LOGI(TAG, "RX id=0x%lx ide=%d dlc=%d",
-                        (unsigned long)rx_frames[rx_frames_read].header.id,
-                        rx_frames[rx_frames_read].header.ide,
-                        rx_frames[rx_frames_read].header.dlc);
-                ESP_LOG_BUFFER_HEX(TAG, rx_frames[rx_frames_read].data, rx_frames[rx_frames_read].len);
-            }
-            rx_frames_read = rx_frames_max = -1;
-            rx_pending = false;
-        }
-        
+    while (1){
+
         if (read_sensor == true){
             uint8_t rx_data[6];
             read_adxl345(rx_data);
@@ -327,7 +358,12 @@ void app_main(void)
                     // ESP_LOGI(TAG, "can transmit id: %d", i);
                     uint8_t remaining = buffer_size - i;
                     uint8_t chunk_len = (remaining < 8) ? remaining : 8;
-                    can_transmit(can_id++, false, &sensor_buffer[i], chunk_len);
+
+                    esp_err_t e = can_send_async(can_id++, false, &sensor_buffer[i], chunk_len, pdMS_TO_TICKS(10));
+                    if (e != ESP_OK)
+                    {
+                        ESP_LOGE(TAG, "enqueue failed: %s", esp_err_to_name(e));
+                    }
                 }
 
                 free(adxl345); // cleanup
