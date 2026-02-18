@@ -222,42 +222,39 @@ static const twai_event_callbacks_t user_cbs = {
     .on_rx_done = twai_rx_cb,
 };
 
-void can_setup(void)
-{
-    ESP_ERROR_CHECK(twai_new_node_onchip(&node_config, &node_hdl));
-
-
-    ESP_ERROR_CHECK(twai_node_register_event_callbacks(node_hdl, &user_cbs, NULL));
-    
-    rx_queue = xQueueCreate(RX_QUEUE_LEN, sizeof(can_msg_t));
-    tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(can_msg_t));
-
-    configASSERT(rx_queue);
-    configASSERT(tx_queue);
-
-    ESP_ERROR_CHECK(twai_node_enable(node_hdl));
-    ESP_LOGI(TAG, "TWAI enabled");
-
-    xTaskCreatePinnedToCore(tx_task, "tx_task", 4096, NULL, 10, NULL, 0); //10 is arbitrary priority here, maybe change?
-    xTaskCreatePinnedToCore(rx_task, "rx_task", 4096, NULL, 11, NULL, 0); 
-}
 
 static void tx_task(void *arg)
 {
     (void)arg;
+
+    // necessary becasue twai_node_transmit is zero copy
+    static twai_frame_t tx_desc_pool[TX_QUEUE_LEN];
+    static uint8_t      tx_data_pool[TX_QUEUE_LEN][8];
+    static uint8_t      pool_idx = 0;
+
     can_msg_t m = {0};
 
     while (1) {
         if (xQueueReceive(tx_queue, &m, portMAX_DELAY) == pdTRUE) {
-            twai_frame_t tx = {0};
-            tx.header.id  = m.id;
-            tx.header.ide = m.ide;
-            tx.header.rtr = false;
-            tx.header.dlc = m.dlc;
-            tx.buffer     = m.data;
-            tx.buffer_len = m.dlc;
 
-            esp_err_t err = twai_node_transmit(node_hdl, &tx, pdMS_TO_TICKS(50));
+            uint8_t idx = pool_idx++ % TX_QUEUE_LEN;
+
+            memset(tx_data_pool[idx], 0, 8);
+            memcpy(tx_data_pool[idx], m.data, m.dlc);
+
+            twai_frame_t *tx = &tx_desc_pool[idx];
+            memset(tx, 0, sizeof(*tx));
+
+            tx->header.id  = m.id;
+            tx->header.ide = m.ide;
+            tx->header.rtr = false;
+            tx->header.dlc = m.dlc;
+            tx->buffer     = tx_data_pool[idx];
+            tx->buffer_len = m.dlc;
+
+            // ESP_LOGI(TAG, "TX id=0x%lx dlc=%u", (unsigned long)m.id, m.dlc);
+
+            esp_err_t err = twai_node_transmit(node_hdl, tx, pdMS_TO_TICKS(50));
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "TX failed id=0x%lx: %s",
                          (unsigned long)m.id, esp_err_to_name(err));
@@ -283,6 +280,27 @@ esp_err_t can_send_async(uint32_t id, bool extended, const uint8_t *data, uint8_
         return ESP_ERR_TIMEOUT;  // queue full
     }
     return ESP_OK;
+}
+
+
+void can_setup(void)
+{
+    ESP_ERROR_CHECK(twai_new_node_onchip(&node_config, &node_hdl));
+
+
+    ESP_ERROR_CHECK(twai_node_register_event_callbacks(node_hdl, &user_cbs, NULL));
+    
+    rx_queue = xQueueCreate(RX_QUEUE_LEN, sizeof(can_msg_t));
+    tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(can_msg_t));
+
+    configASSERT(rx_queue);
+    configASSERT(tx_queue);
+
+    ESP_ERROR_CHECK(twai_node_enable(node_hdl));
+    ESP_LOGI(TAG, "TWAI enabled");
+
+    xTaskCreatePinnedToCore(tx_task, "tx_task", 4096, NULL, 10, NULL, 1); //10 is arbitrary priority here, maybe change?
+    xTaskCreatePinnedToCore(rx_task, "rx_task", 4096, NULL, 11, NULL, 1); 
 }
 
 void transmit_adxl345(TimerHandle_t xTimer)
